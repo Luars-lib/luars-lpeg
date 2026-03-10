@@ -1,9 +1,3 @@
-/// LPeg core types - mirrors lptypes.h, lpvm.h, lpcap.h, lptree.h
-
-// ============================================================
-// Constants
-// ============================================================
-
 pub const VERSION: &str = "1.1.0";
 pub const PATTERN_T: &str = "lpeg-pattern";
 
@@ -20,21 +14,13 @@ pub const CHARSETSIZE: usize = 256 / BITSPERCHAR;
 pub const MAXBEHIND: usize = 255;
 /// Maximum offset in IFullCapture
 pub const MAXOFF: usize = 0xF;
-/// Maximum aux field value
-pub const MAXAUX: usize = 0xFF;
-
 /// Initial capture list size
 pub const INITCAPSIZE: usize = 32;
 /// Initial backtrack stack size
 pub const INITBACK: usize = MAXBACK;
 
-/// Maximum pattern tree size (in TTree elements)
-pub const MAXPATTSIZE: usize = i16::MAX as usize - 10;
-
 /// Maximum recursion level for capture processing
 pub const MAXRECLEVEL: usize = 200;
-/// Maximum nested captures for string capture (%0-%9)
-pub const MAXSTRCAPS: usize = 10;
 /// Maximum lookback distance for findopen
 pub const MAXLOP: usize = 20;
 
@@ -50,11 +36,6 @@ pub type Charset = [u8; CHARSETSIZE];
 #[inline]
 pub fn setchar(cs: &mut Charset, b: u8) {
     cs[(b >> 3) as usize] |= 1 << (b & 7);
-}
-
-#[inline]
-pub fn testchar(cs: &[u8], c: u8) -> bool {
-    (cs[(c >> 3) as usize] >> (c & 7)) & 1 != 0
 }
 
 #[inline]
@@ -113,13 +94,13 @@ pub enum TTag {
 pub const NUM_SIBLINGS: [u8; 19] = [
     0, 0, 0, // TChar, TSet, TAny
     0, 0, 0, // TTrue, TFalse, TUTFR
-    1,       // TRep
-    2, 2,    // TSeq, TChoice
-    1, 1,    // TNot, TAnd
-    0, 0,    // TCall, TOpenCall
+    1, // TRep
+    2, 2, // TSeq, TChoice
+    1, 1, // TNot, TAnd
+    0, 0, // TCall, TOpenCall
     2, 1, 1, // TRule, TXInfo, TGrammar
-    1,       // TBehind
-    1, 1,    // TCapture, TRunTime
+    1, // TBehind
+    1, 1, // TCapture, TRunTime
 ];
 
 // ============================================================
@@ -323,35 +304,6 @@ impl TTree {
 
     pub fn num_siblings(&self) -> u8 {
         NUM_SIBLINGS[self.tag as usize]
-    }
-}
-
-// ============================================================
-// Pattern (tree + compiled code + ktable)
-// ============================================================
-
-/// A full LPeg pattern: tree of nodes + optional compiled instructions + ktable
-#[derive(Debug, Clone)]
-pub struct Pattern {
-    pub tree: Vec<TTree>,
-    pub code: Option<Vec<Instruction>>,
-    /// ktable: Lua values associated with pattern nodes (stored as indices to
-    /// a Lua-side table, but we keep a Vec of LuaValue here)
-    pub ktable: Vec<luars::LuaValue>,
-}
-
-impl Pattern {
-    pub fn new(tree: Vec<TTree>) -> Self {
-        Pattern {
-            tree,
-            code: None,
-            ktable: Vec::new(),
-        }
-    }
-
-    /// Invalidate compiled code (when tree is modified)
-    pub fn invalidate_code(&mut self) {
-        self.code = None;
     }
 }
 

@@ -1,9 +1,9 @@
-/// Pattern compiler - mirrors lpcode.c
-/// Compiles TTree (pattern AST) into VM instructions.
-
-use crate::types::*;
+use crate::cap::Pattern;
 use crate::charset::*;
 use crate::tree::*;
+/// Pattern compiler - mirrors lpcode.c
+/// Compiles TTree (pattern AST) into VM instructions.
+use crate::types::*;
 
 /// Sentinel: "no instruction"
 const NOINST: i32 = -1;
@@ -54,13 +54,11 @@ impl<'a> CompileState<'a> {
 
     /// Add an instruction followed by space for an offset
     fn addoffsetinst(&mut self, op: Opcode) -> usize {
-        let i = self.addinstruction(op, 0);
-        self.addinstruction(Opcode::IEmpty, 0); // space for offset
-        i
+        self.addinstruction(op, 0)
     }
 
     fn setoffset(&mut self, inst: usize, offset: i32) {
-        self.getinstr_mut(inst + 1).offset = offset;
+        self.getinstr_mut(inst).offset = offset;
     }
 
     fn jumptothere(&mut self, inst: i32, target: usize) {
@@ -168,7 +166,7 @@ fn codeutfr(compst: &mut CompileState, tree: &[TTree], idx: usize) {
     assert!(tree[xinfo_idx].tag == TTag::TXInfo);
     let to = tree[xinfo_idx].n;
     let from = tree[idx].n;
-    compst.getinstr_mut(i + 1).offset = from;
+    compst.getinstr_mut(i).offset = from;
     compst.getinstr_mut(i).aux1 = (to & 0xFF) as u8;
     compst.getinstr_mut(i).key = (to >> 8) as i16;
 }
@@ -205,14 +203,14 @@ fn codetestset(compst: &mut CompileState, cs: &Charset, e: bool) -> i32 {
 /// Find final target of a chain of jumps
 fn finaltarget(code: &[Instruction], mut i: usize) -> usize {
     while code[i].code == Opcode::IJmp {
-        i = (i as i32 + code[i + 1].offset) as usize;
+        i = (i as i32 + code[i].offset) as usize;
     }
     i
 }
 
 /// Final label (target of the label at instruction i)
 fn finallabel(code: &[Instruction], i: usize) -> usize {
-    let target = (i as i32 + code[i + 1].offset) as usize;
+    let target = (i as i32 + code[i].offset) as usize;
     finaltarget(code, target)
 }
 
@@ -291,13 +289,7 @@ fn codeand(compst: &mut CompileState, tree: &[TTree], idx: usize, tt: i32) {
     }
 }
 
-fn codecapture(
-    compst: &mut CompileState,
-    tree: &[TTree],
-    idx: usize,
-    tt: i32,
-    fl: &Charset,
-) {
+fn codecapture(compst: &mut CompileState, tree: &[TTree], idx: usize, tt: i32, fl: &Charset) {
     let body = sib1(idx);
     let len = fixedlen(tree, body);
     if len >= 0 && len <= MAXOFF as i32 && !hascaptures(tree, body) {
@@ -363,13 +355,7 @@ fn coderepcharset(compst: &mut CompileState, tree: &[TTree], idx: usize) -> bool
     }
 }
 
-fn coderep(
-    compst: &mut CompileState,
-    tree: &[TTree],
-    idx: usize,
-    opt: bool,
-    fl: &Charset,
-) {
+fn coderep(compst: &mut CompileState, tree: &[TTree], idx: usize, opt: bool, fl: &Charset) {
     if !coderepcharset(compst, tree, idx) {
         let mut st = [0u8; CHARSETSIZE];
         let e1 = getfirst(tree, idx, &FULLSET, &mut st);
@@ -433,36 +419,23 @@ fn correctcalls(compst: &mut CompileState, positions: &[usize], from: usize, to:
             let n = code[i].key as usize; // rule number
             let rule = positions[n];
             // check tail call: call; ret → jmp
-            let tgt = (i as i32 + 2 + code[i + 1].offset) as usize;
-            let ft = finaltarget(code, tgt.max(i + 2).min(code.len().saturating_sub(1)));
+            let tgt = (i as i32 + 1 + code[i].offset) as usize;
+            let ft = finaltarget(code, tgt.max(i + 1).min(code.len().saturating_sub(1)));
             if ft < code.len() && code[ft].code == Opcode::IRet {
                 code[i].code = Opcode::IJmp;
             } else {
                 code[i].code = Opcode::ICall;
             }
-            code[i + 1].offset = rule as i32 - i as i32;
+            code[i].offset = rule as i32 - i as i32;
         }
         i += sizei(&code[i]);
     }
 }
 
 /// Get instruction size
-pub fn sizei(inst: &Instruction) -> usize {
-    match inst.code {
-        Opcode::ISet | Opcode::ISpan => 1, // charset is stored inline
-        Opcode::ITestSet => 2,              // inst + offset (charset inline)
-        Opcode::ITestChar
-        | Opcode::ITestAny
-        | Opcode::IChoice
-        | Opcode::IJmp
-        | Opcode::ICall
-        | Opcode::IOpenCall
-        | Opcode::ICommit
-        | Opcode::IPartialCommit
-        | Opcode::IBackCommit
-        | Opcode::IUTFR => 2,
-        _ => 1,
-    }
+pub fn sizei(_inst: &Instruction) -> usize {
+    // All instructions are 1 slot; offsets are stored inline in the Instruction struct
+    1
 }
 
 fn codegrammar(compst: &mut CompileState, tree: &[TTree], idx: usize) {
@@ -521,7 +494,7 @@ fn codegen(
     compst: &mut CompileState,
     tree: &[TTree],
     mut idx: usize,
-    mut opt: bool,
+    opt: bool,
     mut tt: i32,
     fl: &Charset,
 ) {
@@ -615,23 +588,22 @@ fn peephole(compst: &mut CompileState) {
             | Opcode::ITestAny => {
                 // optimize label to final destination
                 let fl = finallabel(code, i);
-                code[i + 1].offset = fl as i32 - i as i32;
+                code[i].offset = fl as i32 - i as i32;
             }
             Opcode::IJmp => {
                 let ft = finaltarget(code, i);
                 match code[ft].code {
                     Opcode::IRet | Opcode::IFail | Opcode::IFailTwice | Opcode::IEnd => {
                         code[i] = code[ft].clone();
-                        code[i + 1].code = Opcode::IEmpty;
                     }
                     Opcode::ICommit | Opcode::IPartialCommit | Opcode::IBackCommit => {
                         let fft = finallabel(code, ft);
                         code[i] = code[ft].clone();
-                        code[i + 1].offset = fft as i32 - i as i32;
+                        code[i].offset = fft as i32 - i as i32;
                         continue; // re-optimize
                     }
                     _ => {
-                        code[i + 1].offset = ft as i32 - i as i32;
+                        code[i].offset = ft as i32 - i as i32;
                     }
                 }
             }

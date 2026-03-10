@@ -1,5 +1,4 @@
 /// VM pattern matching engine - mirrors lpvm.c
-
 use crate::types::*;
 
 // ============================================================
@@ -64,7 +63,7 @@ pub fn vm_match(
     let e = subject.len(); // end of subject
     let mut p: usize = 0; // current instruction index
     let mut captop: usize = 0; // capture stack top
-    let mut ndyncap: usize = 0; // dynamic captures count (unused in pure impl)
+    let _ndyncap: usize = 0; // dynamic captures count (unused in pure impl)
 
     let mut stack: Vec<StackEntry> = Vec::with_capacity(INITBACK);
     // sentinel entry
@@ -219,7 +218,7 @@ pub fn vm_match(
 
             Opcode::ICall => {
                 stack.push(StackEntry {
-                    s: None, // call frame
+                    s: None,  // call frame
                     p: p + 1, // return address
                     caplevel: 0,
                 });
@@ -331,7 +330,7 @@ pub fn vm_match(
 fn do_fail(
     stack: &mut Vec<StackEntry>,
     s: &mut usize,
-    captures: &mut Vec<Capture>,
+    _captures: &mut Vec<Capture>,
     captop: &mut usize,
 ) -> Option<usize> {
     loop {

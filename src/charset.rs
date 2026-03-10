@@ -1,5 +1,4 @@
 /// Character set operations - mirrors lpcset.c / lpcset.h
-
 use crate::types::*;
 
 /// Analyze a 256-bit charset and classify it.

@@ -1,7 +1,6 @@
-/// Tree analysis and construction utilities - mirrors parts of lpcode.c and lptree.c
-
-use crate::types::*;
 use crate::charset::*;
+/// Tree analysis and construction utilities - mirrors parts of lpcode.c and lptree.c
+use crate::types::*;
 
 // ============================================================
 // Tree child access helpers
@@ -19,36 +18,6 @@ pub fn sib2(tree: &[TTree], idx: usize) -> usize {
     (idx as i32 + tree[idx].ps) as usize
 }
 
-/// Get tree size in nodes (recursive)
-pub fn tree_size(tree: &[TTree], idx: usize) -> usize {
-    let t = &tree[idx];
-    let siblings = NUM_SIBLINGS[t.tag as usize];
-    match siblings {
-        0 => {
-            if t.tag == TTag::TSet {
-                // TSet occupies extra space for bitmap
-                if let Some(ref set) = t.set {
-                    let bsize = std::mem::size_of::<TTree>(); // approximate
-                    let _ = bsize;
-                    // In our representation each TTree is one element, set is inline
-                    1
-                } else {
-                    1
-                }
-            } else {
-                1
-            }
-        }
-        1 => 1 + tree_size(tree, sib1(idx)),
-        2 => {
-            let s2 = sib2(tree, idx);
-            let s1_size = s2 - sib1(idx);
-            1 + s1_size + tree_size(tree, s2)
-        }
-        _ => 1,
-    }
-}
-
 // ============================================================
 // Nullable / Nofail analysis (from lpcode.c checkaux)
 // ============================================================
@@ -62,13 +31,18 @@ pub const PE_NOFAIL: u8 = 1;
 pub fn checkaux(tree: &[TTree], idx: usize, pred: u8) -> bool {
     let t = &tree[idx];
     match t.tag {
-        TTag::TChar | TTag::TSet | TTag::TAny | TTag::TUTFR
-        | TTag::TFalse | TTag::TOpenCall => false,
+        TTag::TChar | TTag::TSet | TTag::TAny | TTag::TUTFR | TTag::TFalse | TTag::TOpenCall => {
+            false
+        }
 
         TTag::TRep | TTag::TTrue => true,
 
         TTag::TNot | TTag::TBehind => {
-            if pred == PE_NOFAIL { false } else { true }
+            if pred == PE_NOFAIL {
+                false
+            } else {
+                true
+            }
         }
 
         TTag::TAnd => {
@@ -107,9 +81,7 @@ pub fn checkaux(tree: &[TTree], idx: usize, pred: u8) -> bool {
             checkaux(tree, sib1(idx), pred)
         }
 
-        TTag::TCall => {
-            checkaux(tree, sib2(tree, idx), pred)
-        }
+        TTag::TCall => checkaux(tree, sib2(tree, idx), pred),
     }
 }
 
@@ -195,9 +167,7 @@ pub fn hascaptures(tree: &[TTree], idx: usize) -> bool {
             let siblings = NUM_SIBLINGS[t.tag as usize];
             match siblings {
                 1 => hascaptures(tree, sib1(idx)),
-                2 => {
-                    hascaptures(tree, sib1(idx)) || hascaptures(tree, sib2(tree, idx))
-                }
+                2 => hascaptures(tree, sib1(idx)) || hascaptures(tree, sib2(tree, idx)),
                 _ => false,
             }
         }
@@ -280,9 +250,7 @@ pub fn getfirst(tree: &[TTree], idx: usize, follow: &Charset, firstset: &mut Cha
             if e != 0 { 2 } else { 0 }
         }
 
-        TTag::TCall => {
-            getfirst(tree, sib2(tree, idx), follow, firstset)
-        }
+        TTag::TCall => getfirst(tree, sib2(tree, idx), follow, firstset),
 
         TTag::TAnd => {
             let e = getfirst(tree, sib1(idx), follow, firstset);
@@ -326,8 +294,9 @@ pub fn headfail(tree: &[TTree], idx: usize) -> bool {
     let t = &tree[idx];
     match t.tag {
         TTag::TChar | TTag::TSet | TTag::TAny | TTag::TFalse => true,
-        TTag::TTrue | TTag::TRep | TTag::TRunTime | TTag::TNot
-        | TTag::TBehind | TTag::TUTFR => false,
+        TTag::TTrue | TTag::TRep | TTag::TRunTime | TTag::TNot | TTag::TBehind | TTag::TUTFR => {
+            false
+        }
         TTag::TCapture | TTag::TGrammar | TTag::TRule | TTag::TXInfo | TTag::TAnd => {
             headfail(tree, sib1(idx))
         }
@@ -357,9 +326,18 @@ pub fn headfail(tree: &[TTree], idx: usize) -> bool {
 pub fn needfollow(tree: &[TTree], idx: usize) -> bool {
     let t = &tree[idx];
     match t.tag {
-        TTag::TChar | TTag::TSet | TTag::TAny | TTag::TUTFR
-        | TTag::TFalse | TTag::TTrue | TTag::TAnd | TTag::TNot
-        | TTag::TRunTime | TTag::TGrammar | TTag::TCall | TTag::TBehind
+        TTag::TChar
+        | TTag::TSet
+        | TTag::TAny
+        | TTag::TUTFR
+        | TTag::TFalse
+        | TTag::TTrue
+        | TTag::TAnd
+        | TTag::TNot
+        | TTag::TRunTime
+        | TTag::TGrammar
+        | TTag::TCall
+        | TTag::TBehind
         | TTag::TOpenCall => false,
 
         TTag::TChoice | TTag::TRep => true,
@@ -367,24 +345,5 @@ pub fn needfollow(tree: &[TTree], idx: usize) -> bool {
         TTag::TCapture | TTag::TXInfo | TTag::TRule => needfollow(tree, sib1(idx)),
 
         TTag::TSeq => needfollow(tree, sib2(tree, idx)),
-    }
-}
-
-// ============================================================
-// correctassociativity: (Op (Op t11 t12) t2) => (Op t11 (Op t12 t2))
-// ============================================================
-
-pub fn correctassociativity(tree: &mut Vec<TTree>, idx: usize) {
-    let tag = tree[idx].tag;
-    assert!(tag == TTag::TChoice || tag == TTag::TSeq);
-    loop {
-        let s1 = sib1(idx);
-        if s1 >= tree.len() || tree[s1].tag != tag {
-            break;
-        }
-        // Flatten: the C code does memmove; here we restructure in-place
-        // For our Vec-based tree, this is complex. We handle it at construction
-        // time instead by building right-associative trees directly.
-        break;
     }
 }
