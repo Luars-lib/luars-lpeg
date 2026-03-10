@@ -1,21 +1,23 @@
+mod cap;
+mod charset;
+mod code;
+mod tree;
 /// LPeg binding for luars - complete Lua pattern matching library
+mod types;
+mod vm;
 
-pub mod types;
-pub mod charset;
-pub mod tree;
-pub mod code;
-pub mod vm;
-
-use std::any::Any;
-use luars::{
-    CFunction, LuaResult, LuaState, LuaValue, LuaUserdata, LuaVM,
-    UserDataTrait, UdValue, TableBuilder, Stdlib,
-};
-use types::*;
 use charset::*;
-use tree::*;
 use code::compile;
+use luars::{
+    CFunction, LuaResult, LuaState, LuaUserdata, LuaValue, UdValue, UserDataTrait,
+    lua_value::LuaValueKind, lua_vm::LuaError,
+};
+use std::any::Any;
+use tree::*;
+use types::*;
 use vm::vm_match;
+
+use crate::cap::getcaptures;
 
 // ============================================================
 // Helper: extract Pattern from a LuaValue
@@ -226,7 +228,7 @@ fn string_pattern(s: &[u8]) -> Pattern {
 
 /// Convert a Lua value to a Pattern. Returns Ok(Pattern) or Err.
 /// Mirrors lptree.c getpatt.
-fn getpatt(l: &mut LuaState, idx: usize) -> Result<Pattern, luars::lua_vm::LuaError> {
+fn getpatt(l: &mut LuaState, idx: usize) -> Result<Pattern, LuaError> {
     let args = l.arg_slice();
     if idx >= args.len() {
         return Err(l.error("pattern expected".to_string()));
@@ -236,40 +238,35 @@ fn getpatt(l: &mut LuaState, idx: usize) -> Result<Pattern, luars::lua_vm::LuaEr
         let p = get_pattern(&val).unwrap();
         return Ok(p.clone());
     }
-    match () {
-        _ if val.is_string() => {
+    match val.kind() {
+        LuaValueKind::String => {
             let s = val.as_str().unwrap();
             Ok(string_pattern(s.as_bytes()))
         }
-        _ if val.is_integer() => {
+        LuaValueKind::Integer => {
             let n = val.as_integer().unwrap() as i32;
             Ok(numtree(n))
         }
-        _ if val.is_boolean() => {
+        LuaValueKind::Boolean => {
             if val.as_boolean().unwrap() {
                 Ok(newleaf(TTag::TTrue))
             } else {
                 Ok(newleaf(TTag::TFalse))
             }
         }
-        _ if val.is_table() => {
+        LuaValueKind::Table => {
             // Grammar
             newgrammar(l, idx)
         }
-        _ if val.is_function() => {
+        LuaValueKind::Function => {
             // Function → runtime capture
-            let mut tree = vec![TTree::new(TTag::TRunTime), TTree::new(TTag::TTrue)];
+            let tree = vec![TTree::new(TTag::TRunTime), TTree::new(TTag::TTrue)];
             let mut p = Pattern::new(tree);
             p.ktable.push(val.clone());
             p.tree[0].key = p.ktable.len() as u16;
             Ok(p)
         }
-        _ => {
-            Err(l.error(format!(
-                "pattern expected, got {}",
-                val.type_name()
-            )))
-        }
+        _ => Err(l.error(format!("pattern expected, got {}", val.type_name()))),
     }
 }
 
@@ -438,8 +435,7 @@ fn lp_match(l: &mut LuaState) -> LuaResult<usize> {
 
     // Get pattern and compile if needed
     let pat_val = args[0].clone();
-    let pat = get_pattern_mut(&pat_val)
-        .ok_or_else(|| l.error("pattern expected".to_string()))?;
+    let pat = get_pattern_mut(&pat_val).ok_or_else(|| l.error("pattern expected".to_string()))?;
 
     // Compile pattern if not already compiled
     if pat.code.is_none() {
@@ -561,9 +557,11 @@ fn lp_choice(l: &mut LuaState) -> LuaResult<usize> {
 fn lp_star(l: &mut LuaState) -> LuaResult<usize> {
     let p1 = getpatt(l, 0)?;
     let args = l.arg_slice();
-    let n = args.get(1)
+    let n = args
+        .get(1)
         .and_then(|v| v.as_integer())
-        .ok_or_else(|| l.error("number expected as 2nd argument to '^'".to_string()))? as i32;
+        .ok_or_else(|| l.error("number expected as 2nd argument to '^'".to_string()))?
+        as i32;
 
     let size1 = p1.tree.len();
 
@@ -801,8 +799,9 @@ fn lp_tablecapture(l: &mut LuaState) -> LuaResult<usize> {
 
 /// lpeg.Cg(p [, name]) — group capture
 fn lp_groupcapture(l: &mut LuaState) -> LuaResult<usize> {
-    let args = l.arg_slice();
     let p1 = getpatt(l, 0)?;
+    let args = l.arg_slice();
+
     let label = if args.len() > 1 && !args[1].is_nil() {
         Some(args[1].clone())
     } else {
@@ -870,7 +869,8 @@ fn lp_backref(l: &mut LuaState) -> LuaResult<usize> {
 /// lpeg.Carg(n) — argument capture
 fn lp_argcapture(l: &mut LuaState) -> LuaResult<usize> {
     let args = l.arg_slice();
-    let n = args.first()
+    let n = args
+        .first()
         .and_then(|v| v.as_integer())
         .ok_or_else(|| l.error("number expected".to_string()))? as i32;
     if n < 1 {
@@ -970,9 +970,10 @@ fn lp_constcapture(l: &mut LuaState) -> LuaResult<usize> {
 /// lpeg.S(chars) — character set
 fn lp_set(l: &mut LuaState) -> LuaResult<usize> {
     let args = l.arg_slice();
-    let s = args.first()
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| l.error("string expected".to_string()))?;
+    let s = match args.first().and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return Err(l.error("string expected".to_string())),
+    };
     let mut cs = [0u8; CHARSETSIZE];
     for &b in s.as_bytes() {
         setchar(&mut cs, b);
@@ -988,8 +989,10 @@ fn lp_range(l: &mut LuaState) -> LuaResult<usize> {
     let args = l.arg_slice();
     let mut cs = [0u8; CHARSETSIZE];
     for arg in args.iter() {
-        let s = arg.as_str()
-            .ok_or_else(|| l.error("string expected in R".to_string()))?;
+        let s = match arg.as_str() {
+            Some(s) => s,
+            None => return Err(l.error("string expected".to_string())),
+        };
         let bytes = s.as_bytes();
         if bytes.len() != 2 {
             return Err(l.error("range must have two characters".to_string()));
@@ -1007,12 +1010,15 @@ fn lp_range(l: &mut LuaState) -> LuaResult<usize> {
 /// lpeg.utfR(from, to) — UTF-8 codepoint range
 fn lp_utfr(l: &mut LuaState) -> LuaResult<usize> {
     let args = l.arg_slice();
-    let from = args.first()
-        .and_then(|v| v.as_integer())
-        .ok_or_else(|| l.error("integer expected".to_string()))? as u32;
-    let to = args.get(1)
-        .and_then(|v| v.as_integer())
-        .ok_or_else(|| l.error("integer expected".to_string()))? as u32;
+    let from = match args.first().and_then(|v| v.as_integer()) {
+        Some(v) => v as u32,
+        None => return Err(l.error("integer expected".to_string())),
+    };
+
+    let to = match args.get(1).and_then(|v| v.as_integer()) {
+        Some(v) => v as u32,
+        None => return Err(l.error("integer expected".to_string())),
+    };
     if from > to {
         return Err(l.error("empty range".to_string()));
     }
@@ -1044,10 +1050,15 @@ fn lp_utfr(l: &mut LuaState) -> LuaResult<usize> {
 }
 
 fn utf_info(cp: u32) -> (u8, u8) {
-    if cp <= 0x7f { (1, cp as u8) }
-    else if cp <= 0x7ff { (2, (0xC0 | (cp >> 6)) as u8) }
-    else if cp <= 0xffff { (3, (0xE0 | (cp >> 12)) as u8) }
-    else { (4, (0xF0 | (cp >> 18)) as u8) }
+    if cp <= 0x7f {
+        (1, cp as u8)
+    } else if cp <= 0x7ff {
+        (2, (0xC0 | (cp >> 6)) as u8)
+    } else if cp <= 0xffff {
+        (3, (0xE0 | (cp >> 12)) as u8)
+    } else {
+        (4, (0xF0 | (cp >> 18)) as u8)
+    }
 }
 
 /// lpeg.B(p) — look-behind
@@ -1165,7 +1176,8 @@ fn newgrammar(l: &mut LuaState, arg_idx: usize) -> Result<Pattern, luars::lua_vm
         Some(ref v) if v.is_string() => {
             // It's the name of the initial rule
             let name = v.clone();
-            let rule = l.raw_get(&gram_table, &name)
+            let rule = l
+                .raw_get(&gram_table, &name)
                 .ok_or_else(|| l.error("grammar has no initial rule".to_string()))?;
             (name, rule)
         }
@@ -1183,13 +1195,17 @@ fn newgrammar(l: &mut LuaState, arg_idx: usize) -> Result<Pattern, luars::lua_vm
     }
 
     // Collect all rules: iterate over the table
-    let pairs = gram_table.as_table()
+    let pairs = gram_table
+        .as_table()
         .ok_or_else(|| l.error("table expected".to_string()))?
         .iter_all();
     let mut rules: Vec<(LuaValue, Pattern)> = Vec::new();
 
     // Add initial rule first
-    rules.push((initial_key.clone(), get_pattern(&initial_rule).unwrap().clone()));
+    rules.push((
+        initial_key.clone(),
+        get_pattern(&initial_rule).unwrap().clone(),
+    ));
 
     for (k, v) in &pairs {
         // Skip the initial rule (already added) and index 1 if it was a name
@@ -1198,13 +1214,19 @@ fn newgrammar(l: &mut LuaState, arg_idx: usize) -> Result<Pattern, luars::lua_vm
         }
         // Check if this is the same as initial_key
         if let (Some(ks), Some(iks)) = (k.as_str(), initial_key.as_str()) {
-            if ks == iks { continue; }
+            if ks == iks {
+                continue;
+            }
         }
         if let (Some(ki), Some(iki)) = (k.as_integer(), initial_key.as_integer()) {
-            if ki == iki { continue; }
+            if ki == iki {
+                continue;
+            }
         }
         if !is_pattern(v) {
-            let name = k.as_str().map(|s| s.to_string())
+            let name = k
+                .as_str()
+                .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("{:?}", k));
             return Err(l.error(format!("rule '{}' is not a pattern", name)));
         }
@@ -1296,7 +1318,8 @@ fn newgrammar(l: &mut LuaState, arg_idx: usize) -> Result<Pattern, luars::lua_vm
                 }
             }
             if !found {
-                let name = rule_name.as_str()
+                let name = rule_name
+                    .as_str()
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| format!("{:?}", rule_name));
                 return Err(l.error(format!("rule '{}' undefined in given grammar", name)));
@@ -1318,31 +1341,42 @@ fn newgrammar(l: &mut LuaState, arg_idx: usize) -> Result<Pattern, luars::lua_vm
     Ok(result)
 }
 
-fn verify_grammar(tree: &[TTree], ktable: &[LuaValue], l: &mut LuaState) -> Result<(), luars::lua_vm::LuaError> {
+fn verify_grammar(
+    tree: &[TTree],
+    ktable: &[LuaValue],
+    l: &mut LuaState,
+) -> Result<(), luars::lua_vm::LuaError> {
     // Check left recursion for each rule
     let mut rule_idx = sib1(0); // first rule
     while rule_idx < tree.len() && tree[rule_idx].tag == TTag::TRule {
-        if tree[rule_idx].key != 0 { // used rule
+        if tree[rule_idx].key != 0 {
+            // used rule
             let body = sib1(sib1(rule_idx)); // skip TXInfo
             let mut passed = Vec::new();
             if !verifyrule(tree, body, &mut passed) {
                 // Check for left recursion
                 if has_duplicate(&passed) {
                     let name = if tree[rule_idx].key > 0 {
-                        ktable.get(tree[rule_idx].key as usize - 1)
+                        ktable
+                            .get(tree[rule_idx].key as usize - 1)
                             .and_then(|v| v.as_str())
                             .unwrap_or("?")
-                    } else { "?" };
+                    } else {
+                        "?"
+                    };
                     return Err(l.error(format!("rule '{}' may be left recursive", name)));
                 }
             }
             // Check infinite loops
             if checkloops(tree, body) {
                 let name = if tree[rule_idx].key > 0 {
-                    ktable.get(tree[rule_idx].key as usize - 1)
+                    ktable
+                        .get(tree[rule_idx].key as usize - 1)
                         .and_then(|v| v.as_str())
                         .unwrap_or("?")
-                } else { "?" };
+                } else {
+                    "?"
+                };
                 return Err(l.error(format!("empty loop in rule '{}'", name)));
             }
         }
@@ -1354,7 +1388,9 @@ fn verify_grammar(tree: &[TTree], ktable: &[LuaValue], l: &mut LuaState) -> Resu
 fn has_duplicate(v: &[u16]) -> bool {
     for i in 0..v.len() {
         for j in 0..i {
-            if v[i] == v[j] { return true; }
+            if v[i] == v[j] {
+                return true;
+            }
         }
     }
     false
@@ -1362,7 +1398,9 @@ fn has_duplicate(v: &[u16]) -> bool {
 
 /// Returns true if pattern is nullable (for left-recursion check)
 fn verifyrule(tree: &[TTree], idx: usize, passed: &mut Vec<u16>) -> bool {
-    if idx >= tree.len() { return true; }
+    if idx >= tree.len() {
+        return true;
+    }
     match tree[idx].tag {
         TTag::TChar | TTag::TSet | TTag::TAny | TTag::TFalse | TTag::TUTFR => false,
         TTag::TTrue | TTag::TBehind => true,
@@ -1394,7 +1432,9 @@ fn verifyrule(tree: &[TTree], idx: usize, passed: &mut Vec<u16>) -> bool {
 }
 
 fn checkloops(tree: &[TTree], idx: usize) -> bool {
-    if idx >= tree.len() { return false; }
+    if idx >= tree.len() {
+        return false;
+    }
     if tree[idx].tag == TTag::TRep && nullable(&tree, sib1(idx)) {
         return true;
     }
@@ -1408,634 +1448,3 @@ fn checkloops(tree: &[TTree], idx: usize) -> bool {
         _ => false,
     }
 }
-
-// ============================================================
-// Capture processing: getcaptures / pushcapture
-// ============================================================
-
-/// Capture evaluation state
-struct CapState<'a> {
-    captures: &'a [Capture],
-    pos: usize,         // current position in captures
-    subject: &'a [u8],
-    ktable: &'a [LuaValue],
-    extra_args: &'a [LuaValue],
-    reclevel: usize,
-    /// Values accumulated during capture processing
-    values: Vec<LuaValue>,
-    /// Runtime capture values (from Cmt)
-    runtime_values: &'a [LuaValue],
-}
-
-impl<'a> CapState<'a> {
-    fn cap(&self) -> &Capture {
-        &self.captures[self.pos]
-    }
-
-    fn advance(&mut self) {
-        self.pos += 1;
-    }
-
-    fn from_ktable(&self, idx: u16) -> LuaValue {
-        if idx == 0 || idx as usize > self.ktable.len() {
-            LuaValue::nil()
-        } else {
-            self.ktable[idx as usize - 1].clone()
-        }
-    }
-}
-
-/// Skip close capture if head was an open capture
-fn skipclose(cs: &mut CapState) {
-    if cs.cap().is_open() {
-        debug_assert!(cs.captures[cs.pos].is_close());
-        cs.advance();
-    }
-}
-
-/// Go to next capture at same level
-fn nextcap(cs: &mut CapState) {
-    let cap = cs.cap();
-    if cap.is_open() {
-        let mut n = 0u32;
-        loop {
-            cs.advance();
-            if cs.cap().is_open() {
-                n += 1;
-            } else if cs.cap().is_close() {
-                if n == 0 { break; }
-                n -= 1;
-            }
-        }
-        cs.advance(); // skip the close
-    } else {
-        let start = cs.pos;
-        cs.advance();
-        while cs.pos < cs.captures.len()
-            && cs.captures[start].cap_inside(&cs.captures[cs.pos])
-        {
-            cs.advance();
-        }
-    }
-}
-
-/// Get size of current capture (using corresponding close if open)
-fn closesize(cs: &CapState, head_pos: usize) -> u32 {
-    let head = &cs.captures[head_pos];
-    head.cap_size(cs.cap())
-}
-
-/// Push all nested values; if addextra or no nested values, push the full match
-fn pushnestedvalues(cs: &mut CapState, addextra: bool) -> LuaResult<usize> {
-    let head_pos = cs.pos;
-    let head_index = cs.captures[head_pos].index;
-    cs.advance();
-    let mut n = 0usize;
-    while cs.pos < cs.captures.len()
-        && cs.captures[head_pos].cap_inside(cs.cap())
-    {
-        n += pushcapture(cs)?;
-    }
-    if addextra || n == 0 {
-        let size = closesize(cs, head_pos) as usize;
-        let start = head_index as usize;
-        let end = (start + size).min(cs.subject.len());
-        let s = String::from_utf8_lossy(&cs.subject[start..end]).to_string();
-        cs.values.push(LuaValue::from(s.as_str()));
-        n += 1;
-    }
-    // Skip close if head was open
-    if cs.captures[head_pos].is_open() {
-        debug_assert!(cs.pos < cs.captures.len() && cs.captures[cs.pos].is_close());
-        cs.advance();
-    }
-    Ok(n)
-}
-
-/// Push only first nested value
-fn pushonenestedvalue(cs: &mut CapState) -> LuaResult<()> {
-    let before = cs.values.len();
-    let n = pushnestedvalues(cs, false)?;
-    if n > 1 {
-        // Remove extra values, keep only the first
-        cs.values.truncate(before + 1);
-    }
-    Ok(())
-}
-
-/// Find open capture corresponding to a close at current position
-fn findopen(captures: &[Capture], close_pos: usize) -> usize {
-    let mut n = 0u32;
-    let mut pos = close_pos;
-    loop {
-        pos -= 1;
-        if captures[pos].is_close() {
-            n += 1;
-        } else if captures[pos].is_open() {
-            if n == 0 { return pos; }
-            n -= 1;
-        }
-    }
-}
-
-/// Find named back reference
-fn findback<'a>(cs: &CapState<'a>, ref_pos: usize) -> Option<usize> {
-    let ref_cap = &cs.captures[ref_pos];
-    let name = cs.from_ktable(ref_cap.idx);
-    let mut pos = ref_pos;
-    while pos > 0 {
-        pos -= 1;
-        let cap = &cs.captures[pos];
-        if cap.is_close() {
-            pos = findopen(cs.captures, pos);
-            continue;
-        }
-        if cap.cap_inside(ref_cap) {
-            continue;
-        }
-        if cap.kind == CapKind::Cgroup {
-            let cap_name = cs.from_ktable(cap.idx);
-            if values_equal(&name, &cap_name) {
-                return Some(pos);
-            }
-        }
-    }
-    None
-}
-
-fn values_equal(a: &LuaValue, b: &LuaValue) -> bool {
-    if a.is_nil() && b.is_nil() { return true; }
-    if let (Some(sa), Some(sb)) = (a.as_str(), b.as_str()) {
-        return sa == sb;
-    }
-    if let (Some(ia), Some(ib)) = (a.as_integer(), b.as_integer()) {
-        return ia == ib;
-    }
-    false
-}
-
-/// Main capture evaluation function
-fn pushcapture(cs: &mut CapState) -> LuaResult<usize> {
-    if cs.reclevel > MAXRECLEVEL {
-        return Ok(0); // avoid stack overflow
-    }
-    cs.reclevel += 1;
-    let res = match cs.cap().kind {
-        CapKind::Cposition => {
-            let pos = cs.cap().index as i64 + 1;
-            cs.values.push(LuaValue::integer(pos));
-            cs.advance();
-            1
-        }
-        CapKind::Cconst => {
-            let val = cs.from_ktable(cs.cap().idx);
-            cs.values.push(val);
-            cs.advance();
-            1
-        }
-        CapKind::Carg => {
-            let arg_idx = cs.cap().idx as usize;
-            cs.advance();
-            if arg_idx == 0 || arg_idx > cs.extra_args.len() {
-                return Err(luars::lua_vm::LuaError::RuntimeError(
-                    format!("reference to absent extra argument #{}", arg_idx)
-                ));
-            }
-            cs.values.push(cs.extra_args[arg_idx - 1].clone());
-            1
-        }
-        CapKind::Csimple => {
-            let before = cs.values.len();
-            let k = pushnestedvalues(cs, true)?;
-            // Rotate: make whole match first result
-            if k > 1 {
-                let vals: Vec<LuaValue> = cs.values.drain(before..).collect();
-                // Last pushed is the whole match, move it to front
-                let last = vals.last().unwrap().clone();
-                cs.values.push(last);
-                for v in &vals[..vals.len() - 1] {
-                    cs.values.push(v.clone());
-                }
-            }
-            k
-        }
-        CapKind::Cruntime => {
-            let cap = cs.cap().clone();
-            cs.advance();
-            // Runtime captures have their value stored by the VM
-            // The idx field points to the Lua stack position
-            if (cap.idx as usize) > 0 && (cap.idx as usize) <= cs.runtime_values.len() {
-                cs.values.push(cs.runtime_values[cap.idx as usize - 1].clone());
-            } else {
-                cs.values.push(LuaValue::nil());
-            }
-            1
-        }
-        CapKind::Cgroup => {
-            if cs.cap().idx == 0 {
-                // Anonymous group: push all nested values
-                pushnestedvalues(cs, false)?
-            } else {
-                // Named group: skip, produce no values here
-                nextcap(cs);
-                0
-            }
-        }
-        CapKind::Cbackref => {
-            let curr_pos = cs.pos;
-            let found = findback(cs, curr_pos);
-            match found {
-                Some(back_pos) => {
-                    let saved_pos = cs.pos;
-                    cs.pos = back_pos;
-                    let n = pushnestedvalues(cs, false)?;
-                    cs.pos = saved_pos;
-                    cs.advance(); // skip backref cap
-                    n
-                }
-                None => {
-                    return Err(luars::lua_vm::LuaError::RuntimeError(
-                        "back reference not found".to_string()
-                    ));
-                }
-            }
-        }
-        CapKind::Ctable => {
-            tablecap(cs)?
-        }
-        CapKind::Cfunction => {
-            functioncap(cs)?
-        }
-        CapKind::Cacc => {
-            acccap(cs)?
-        }
-        CapKind::Cnum => {
-            numcap(cs)?
-        }
-        CapKind::Cquery => {
-            querycap(cs)?
-        }
-        CapKind::Cstring => {
-            stringcap(cs)?
-        }
-        CapKind::Csubst => {
-            substcap(cs)?
-        }
-        CapKind::Cfold => {
-            foldcap(cs)?
-        }
-        _ => {
-            cs.advance();
-            0
-        }
-    };
-    cs.reclevel -= 1;
-    Ok(res)
-}
-
-/// Table capture: create table from nested captures
-fn tablecap(cs: &mut CapState) -> LuaResult<usize> {
-    let head_pos = cs.pos;
-    cs.advance();
-    let mut arr: Vec<LuaValue> = Vec::new();
-    let mut hash: Vec<(LuaValue, LuaValue)> = Vec::new();
-    let mut n = 0i64;
-    while cs.pos < cs.captures.len()
-        && cs.captures[head_pos].cap_inside(cs.cap())
-    {
-        if cs.cap().kind == CapKind::Cgroup && cs.cap().idx != 0 {
-            // Named group: set as table field
-            let name = cs.from_ktable(cs.cap().idx);
-            let before = cs.values.len();
-            pushonenestedvalue(cs)?;
-            if cs.values.len() > before {
-                let val = cs.values.pop().unwrap();
-                hash.push((name, val));
-            }
-        } else {
-            let before = cs.values.len();
-            let k = pushcapture(cs)?;
-            for _ in 0..k {
-                if cs.values.len() > before {
-                    n += 1;
-                    let val = cs.values.pop().unwrap();
-                    arr.push(val);
-                }
-            }
-        }
-    }
-    // Skip close if head was open
-    if cs.captures[head_pos].is_open() && cs.pos < cs.captures.len() && cs.captures[cs.pos].is_close() {
-        cs.advance();
-    }
-    // We can't create a real Lua table here since we don't have LuaState.
-    // Store as a special marker: we'll handle this in getcaptures.
-    // For now, store the table data as a special LuaValue.
-    // Actually, we need to return a table LuaValue. We'll store a placeholder
-    // and create the table later in getcaptures where we have LuaState access.
-    // Use a Vec of (key, value) pairs stored in a wrapper.
-    let table_data = TableData { array: arr, hash };
-    cs.values.push(LuaValue::from(Box::new(table_data) as Box<dyn std::any::Any>));
-    Ok(1)
-}
-
-/// Wrapper to store table data in LuaValue
-struct TableData {
-    array: Vec<LuaValue>,
-    hash: Vec<(LuaValue, LuaValue)>,
-}
-
-/// Function capture: call function with nested captures
-fn functioncap(cs: &mut CapState) -> LuaResult<usize> {
-    let func = cs.from_ktable(cs.cap().idx);
-    let before = cs.values.len();
-    let n = pushnestedvalues(cs, false)?;
-    // Collect the nested values
-    let nested: Vec<LuaValue> = cs.values.drain(before..).collect();
-    // Store a deferred function call marker
-    let call = DeferredCall::Function { func, args: nested };
-    cs.values.push(LuaValue::from(Box::new(call) as Box<dyn std::any::Any>));
-    Ok(1)
-}
-
-/// Accumulator capture: call function(prev_value, nested...)
-fn acccap(cs: &mut CapState) -> LuaResult<usize> {
-    let func = cs.from_ktable(cs.cap().idx);
-    let before = cs.values.len();
-    // Previous value should be on the value stack
-    let prev = if before > 0 {
-        cs.values.pop().unwrap()
-    } else {
-        return Err(luars::lua_vm::LuaError::RuntimeError(
-            "no previous value for accumulator capture".to_string()
-        ));
-    };
-    let n = pushnestedvalues(cs, false)?;
-    let nested: Vec<LuaValue> = cs.values.drain(cs.values.len() - n..).collect();
-    let mut args = vec![prev];
-    args.extend(nested);
-    let call = DeferredCall::Function { func, args };
-    cs.values.push(LuaValue::from(Box::new(call) as Box<dyn std::any::Any>));
-    Ok(0) // accumulator replaces existing value
-}
-
-/// Number (select) capture
-fn numcap(cs: &mut CapState) -> LuaResult<usize> {
-    let idx = cs.cap().idx as usize;
-    if idx == 0 {
-        nextcap(cs);
-        return Ok(0);
-    }
-    let before = cs.values.len();
-    let n = pushnestedvalues(cs, false)?;
-    if n < idx {
-        return Err(luars::lua_vm::LuaError::RuntimeError(
-            format!("no capture '{}'", idx)
-        ));
-    }
-    // Keep only the idx-th value
-    let vals: Vec<LuaValue> = cs.values.drain(before..).collect();
-    cs.values.push(vals[idx - 1].clone());
-    Ok(1)
-}
-
-/// Query (table) capture: lookup nested value in table
-fn querycap(cs: &mut CapState) -> LuaResult<usize> {
-    let table_val = cs.from_ktable(cs.cap().idx);
-    pushonenestedvalue(cs)?;
-    let key = cs.values.pop().unwrap_or(LuaValue::nil());
-    // Store deferred query call
-    let call = DeferredCall::Query { table: table_val, key };
-    cs.values.push(LuaValue::from(Box::new(call) as Box<dyn std::any::Any>));
-    Ok(1)
-}
-
-/// String capture: format string with %0-%9 capture references
-fn stringcap(cs: &mut CapState) -> LuaResult<usize> {
-    let fmt_val = cs.from_ktable(cs.cap().idx);
-    let fmt = fmt_val.as_str().unwrap_or("").to_string();
-
-    // Collect nested captures
-    let head_pos = cs.pos;
-    cs.advance();
-    let mut nested_strings: Vec<String> = Vec::new();
-    // %0 = whole match
-    let head_index = cs.captures[head_pos].index as usize;
-
-    while cs.pos < cs.captures.len()
-        && cs.captures[head_pos].cap_inside(cs.cap())
-    {
-        if cs.cap().kind == CapKind::Csimple {
-            // Get the string match for this simple capture
-            let cap_start = cs.cap().index as usize;
-            let before = cs.values.len();
-            pushnestedvalues(cs, true)?;
-            // The last value pushed should be the match string
-            if cs.values.len() > before {
-                let val = cs.values.drain(before..).next().unwrap();
-                let s = val.as_str().unwrap_or("").to_string();
-                nested_strings.push(s);
-            }
-        } else {
-            let before = cs.values.len();
-            pushcapture(cs)?;
-            if cs.values.len() > before {
-                let val = cs.values.drain(before..).next().unwrap();
-                let s = val.as_str().unwrap_or("").to_string();
-                nested_strings.push(s);
-            }
-        }
-    }
-
-    let size = closesize(cs, head_pos) as usize;
-    let end = (head_index + size).min(cs.subject.len());
-    let whole_match = String::from_utf8_lossy(&cs.subject[head_index..end]).to_string();
-
-    // Skip close
-    if cs.captures[head_pos].is_open() && cs.pos < cs.captures.len() && cs.captures[cs.pos].is_close() {
-        cs.advance();
-    }
-
-    // Process format string
-    let mut result = String::new();
-    let fmt_bytes = fmt.as_bytes();
-    let mut i = 0;
-    while i < fmt_bytes.len() {
-        if fmt_bytes[i] == b'%' && i + 1 < fmt_bytes.len() {
-            i += 1;
-            if fmt_bytes[i] >= b'0' && fmt_bytes[i] <= b'9' {
-                let idx = (fmt_bytes[i] - b'0') as usize;
-                if idx == 0 {
-                    result.push_str(&whole_match);
-                } else if idx <= nested_strings.len() {
-                    result.push_str(&nested_strings[idx - 1]);
-                }
-            } else {
-                result.push(fmt_bytes[i] as char);
-            }
-        } else {
-            result.push(fmt_bytes[i] as char);
-        }
-        i += 1;
-    }
-
-    cs.values.push(LuaValue::from(result.as_str()));
-    Ok(1)
-}
-
-/// Substitution capture
-fn substcap(cs: &mut CapState) -> LuaResult<usize> {
-    let head_pos = cs.pos;
-    let head_index = cs.captures[head_pos].index as usize;
-    cs.advance();
-    let mut result = String::new();
-    let mut curr = head_index;
-
-    while cs.pos < cs.captures.len()
-        && cs.captures[head_pos].cap_inside(cs.cap())
-    {
-        let cap_start = cs.cap().index as usize;
-        // Add text before this capture
-        if cap_start > curr && cap_start <= cs.subject.len() {
-            result.push_str(&String::from_utf8_lossy(&cs.subject[curr..cap_start]));
-        }
-        let before = cs.values.len();
-        let n = pushcapture(cs)?;
-        if n > 0 && cs.values.len() > before {
-            let val = cs.values.drain(before..).next().unwrap();
-            if let Some(s) = val.as_str() {
-                result.push_str(s);
-                // Update curr to skip captured region
-                let close_pos = if cs.captures[head_pos].is_open() {
-                    cs.pos.saturating_sub(1)
-                } else {
-                    cs.pos.saturating_sub(1)
-                };
-                curr = cap_start + cs.captures[close_pos.min(cs.captures.len() - 1)].index.saturating_sub(cs.captures[head_pos].index) as usize;
-                continue;
-            }
-        }
-        curr = cap_start;
-    }
-
-    // Add remaining text
-    let size = closesize(cs, head_pos) as usize;
-    let end = (head_index + size).min(cs.subject.len());
-    if curr < end {
-        result.push_str(&String::from_utf8_lossy(&cs.subject[curr..end]));
-    }
-
-    // Skip close
-    if cs.captures[head_pos].is_open() && cs.pos < cs.captures.len() && cs.captures[cs.pos].is_close() {
-        cs.advance();
-    }
-
-    cs.values.push(LuaValue::from(result.as_str()));
-    Ok(1)
-}
-
-/// Fold capture
-fn foldcap(cs: &mut CapState) -> LuaResult<usize> {
-    let head_pos = cs.pos;
-    let func = cs.from_ktable(cs.cap().idx);
-    cs.advance();
-
-    // Get first value (initial accumulator)
-    if cs.pos >= cs.captures.len() || cs.captures[cs.pos].is_close() {
-        return Err(luars::lua_vm::LuaError::RuntimeError(
-            "no initial value for fold capture".to_string()
-        ));
-    }
-    let before = cs.values.len();
-    let n = pushcapture(cs)?;
-    if n == 0 {
-        return Err(luars::lua_vm::LuaError::RuntimeError(
-            "no initial value for fold capture".to_string()
-        ));
-    }
-    // Keep only first value as accumulator
-    if n > 1 {
-        cs.values.truncate(before + 1);
-    }
-
-    // For remaining nested captures, create fold calls
-    while cs.pos < cs.captures.len()
-        && cs.captures[head_pos].cap_inside(cs.cap())
-    {
-        let acc = cs.values.pop().unwrap();
-        let before2 = cs.values.len();
-        let k = pushcapture(cs)?;
-        let nested: Vec<LuaValue> = cs.values.drain(before2..).collect();
-        let mut args = vec![acc];
-        args.extend(nested);
-        let call = DeferredCall::Fold { func: func.clone(), args };
-        cs.values.push(LuaValue::from(Box::new(call) as Box<dyn std::any::Any>));
-    }
-
-    // Skip close
-    if cs.captures[head_pos].is_open() && cs.pos < cs.captures.len() && cs.captures[cs.pos].is_close() {
-        cs.advance();
-    }
-    Ok(1)
-}
-
-/// Deferred function/query calls — resolved in getcaptures with LuaState access
-enum DeferredCall {
-    Function { func: LuaValue, args: Vec<LuaValue> },
-    Query { table: LuaValue, key: LuaValue },
-    Fold { func: LuaValue, args: Vec<LuaValue> },
-}
-
-/// Resolve deferred calls: evaluate any Box<dyn Any> values that contain DeferredCall/TableData
-fn resolve_value(l: &mut LuaState, val: LuaValue) -> LuaResult<Vec<LuaValue>> {
-    // Check if this is a boxed Any (TableData or DeferredCall)
-    // LuaValue doesn't directly support Box<dyn Any>, so we need a different approach.
-    // Actually, LuaValue::from(Box<dyn Any>) doesn't exist in luars.
-    // We need to rethink this approach entirely - can't store arbitrary Rust objects in LuaValue.
-    // Instead, we should process captures with LuaState access from the start.
-    Ok(vec![val])
-}
-
-/// Main entry point: process all captures and push results onto Lua stack
-fn getcaptures(
-    l: &mut LuaState,
-    subject: &[u8],
-    end_pos: usize,
-    captures: &[Capture],
-    ktable: &[LuaValue],
-    extra_args: &[LuaValue],
-) -> LuaResult<usize> {
-    if captures.is_empty() || captures[0].is_close() {
-        // No captures: return end position
-        l.push_value(LuaValue::integer(end_pos as i64 + 1))?;
-        return Ok(1);
-    }
-
-    // Process captures directly with LuaState access  
-    let n = getcaptures_direct(l, subject, captures, ktable, extra_args, &mut 0, 0)?;
-
-    if n == 0 {
-        l.push_value(LuaValue::integer(end_pos as i64 + 1))?;
-        return Ok(1);
-    }
-    Ok(n)
-}
-
-/// Direct capture processing with LuaState access
-fn getcaptures_direct(
-    l: &mut LuaState,
-    subject: &[u8],
-    captures: &[Capture],
-    ktable: &[LuaValue],
-    extra_args: &[LuaValue],
-    pos: &mut usize,
-    reclevel: usize,
-) -> LuaResult<usize> {
-    let mut n = 0usize;
-    while *pos < captures.len() && !captures[*pos].is_close() {
-        n += pushcapture_direct(l, subject, captures, ktable, extra_args, pos, reclevel)?;
-    }
-    Ok(n)
-}
-
-

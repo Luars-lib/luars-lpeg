@@ -110,7 +110,7 @@ pub enum TTag {
 }
 
 /// Number of siblings for each TTag
-pub const NUM_SIBLINGS: [u8; 20] = [
+pub const NUM_SIBLINGS: [u8; 19] = [
     0, 0, 0, // TChar, TSet, TAny
     0, 0, 0, // TTrue, TFalse, TUTFR
     1,       // TRep
